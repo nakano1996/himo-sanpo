@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ひもつき散歩</title>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#e8eee9;--ink:#17302a;--muted:#5b7068;--card:#f6f9f6;--line:#c5d2ca;--acc:#2e47e6;--on:#fff;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1714;--ink:#e3ece7;--muted:#8ea39a;--card:#16231f;--line:#2a3d36;--acc:#8fa3ff;--on:#0e1714}}
+:root[data-theme="dark"]{--bg:#0e1714;--ink:#e3ece7;--muted:#8ea39a;--card:#16231f;--line:#2a3d36;--acc:#8fa3ff;--on:#0e1714}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Zen Kaku Gothic New","Hiragino Sans","Noto Sans JP",sans-serif;line-height:1.6}
+main{max-width:520px;margin:0 auto;padding:20px 18px 40px}
+h1{font-size:30px;font-weight:900;margin:8px 0 2px;letter-spacing:.02em}
+.sub{margin:0 0 20px;color:var(--muted);font-size:15px}
+label{display:block;font-weight:700;font-size:14px;margin:16px 0 6px}
+.row{display:flex;gap:8px}
+input[type=text]{flex:1;min-width:0;font:inherit;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
+input[type=range]{width:100%;accent-color:var(--acc)}
+button,a.btn{font:inherit;font-weight:700;border:0;border-radius:12px;padding:12px 16px;cursor:pointer;text-decoration:none;text-align:center;display:block}
+.ghost{background:var(--card);color:var(--ink);border:1px solid var(--line)}
+.main{background:var(--acc);color:var(--on);width:100%;font-size:18px;padding:15px}
+a.btn{background:var(--ink);color:var(--bg);margin-top:10px}
+a.btn[aria-disabled=true]{opacity:.35;pointer-events:none}
+:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.min{display:flex;justify-content:space-between;align-items:baseline}
+.min b{font-size:26px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:18px 0 6px;padding:6px}
+svg{display:block;width:100%;height:auto}
+.msg{min-height:1.6em;margin:8px 0 0;font-size:14px;color:var(--muted)}
+.msg.err{color:#c0392b}
+</style>
+</head>
+<body>
+<main>
+<h1>ひもつき散歩</h1>
+<p class="sub">ゴールは出発点。道中だけがサイコロ。</p>
+
+<label for="start">出発点(緯度,経度 または GoogleマップのURL)</label>
+<div class="row">
+<input id="start" type="text" inputmode="text" value="35.7172, 139.7369" placeholder="35.7172, 139.7369" autocomplete="off">
+<button class="ghost" id="geo" type="button">現在地</button>
+</div>
+<p class="msg" id="msg"></p>
+
+<label for="via">必ず寄る場所(任意・1か所)</label>
+<div class="row"><input id="via" type="text" placeholder="座標、またはGoogleマップの長いURL" autocomplete="off"><button class="ghost" id="vclr" type="button">クリア</button></div>
+
+<label for="t" class="min"><span>散歩の長さ</span><span><b id="tv">60</b> 分</span></label>
+<input id="t" type="range" min="15" max="180" step="5" value="60">
+
+<label for="n" class="min"><span>立ち寄り地点の数</span><span><b id="nv">7</b> つ</span></label>
+<input id="n" type="range" min="2" max="9" step="1" value="7">
+
+<button class="main" id="go" type="button">コースを作る</button>
+
+<div class="card"><svg id="map" viewBox="0 0 300 300" role="img" aria-label="コースの略図"></svg></div>
+<p class="msg" id="info">略図です。実際の道は、Googleマップで開くと沿ってくれます。</p>
+<a class="btn" id="open" href="#" target="_blank" rel="noopener" aria-disabled="true">Googleマップで開く</a>
+</main>
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)};
+var SPEED=80, DETOUR=1.35; // m/min, 道なりの遠回り係数
+var origin=null, wp=[], genCount=0, fixIdx=-1;
+
+try{var saved=localStorage.getItem('himo-start');if(saved)$('start').value=saved;var sv=localStorage.getItem('himo-via');if(sv!==null)$('via').value=sv}catch(e){}
+
+function parse(s){
+  var m=s.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)||s.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/)||s.match(/(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)/);
+  if(!m)return null;
+  var a=parseFloat(m[1]),b=parseFloat(m[2]);
+  if(Math.abs(a)>90||Math.abs(b)>180)return null;
+  return {lat:a,lng:b};
+}
+function say(t,err){var m=$('msg');m.textContent=t;m.className='msg'+(err?' err':'')}
+function gauss(){var u=0;while(!u)u=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*Math.random())}
+
+// ブラウン橋:始点と終点が同じ点に固定されたランダムウォーク
+function bridge(min,n){
+  var L=min*SPEED/DETOUR;
+  var best=null;
+  for(var k=0;k<300;k++){
+    var w=[[0,0]];
+    for(var i=1;i<=n+1;i++)w.push([w[i-1][0]+gauss(),w[i-1][1]+gauss()]);
+    var e=w[n+1];
+    var p=w.map(function(q,i){return [q[0]-e[0]*i/(n+1),q[1]-e[1]*i/(n+1)]});
+    var len=0,mn=1e9,mx=0;
+    for(i=0;i<=n;i++){var d=Math.hypot(p[i+1][0]-p[i][0],p[i+1][1]-p[i][1]);len+=d;if(d<mn)mn=d}
+    for(i=0;i<=n;i++){var r=Math.hypot(p[i][0],p[i][1]);if(r>mx)mx=r}
+    best=[p,len];
+    if(mn>len/(n+1)*0.35&&mx>len*0.14)break;
+  }
+  var s=L/best[1];
+  return best[0].map(function(q){return [q[0]*s,q[1]*s]}).slice(1,n+1);
+}
+
+// A→B の橋(端点固定のランダムウォーク)。経由点m個、折れ線の長さがLtになるよう振れ幅を調整
+function leg(A,B,m,Lt){
+  var best=null,j,g;
+  var ln=function(c){var t=0,mn=1e9;for(var q=0;q<c.length-1;q++){var d=Math.hypot(c[q+1][0]-c[q][0],c[q+1][1]-c[q][1]);t+=d;if(d<mn)mn=d}return [t,mn]};
+  for(var k=0;k<300;k++){
+    var w=[[0,0]],b=[];
+    for(var i=1;i<=m+1;i++)w.push([w[i-1][0]+gauss(),w[i-1][1]+gauss()]);
+    var e=w[m+1];
+    for(i=1;i<=m;i++)b.push([w[i][0]-e[0]*i/(m+1),w[i][1]-e[1]*i/(m+1)]);
+    var at=function(s){var c=[A];for(var q=1;q<=m;q++)c.push([A[0]+(B[0]-A[0])*q/(m+1)+s*b[q-1][0],A[1]+(B[1]-A[1])*q/(m+1)+s*b[q-1][1]]);c.push(B);return c};
+    var hi=1,lo=0;g=0;
+    while(m>0&&ln(at(hi))[0]<Lt&&g++<60)hi*=2;
+    for(g=0;g<40;g++){var md=(lo+hi)/2;if(ln(at(md))[0]<Lt)lo=md;else hi=md}
+    var c=at(hi),r=ln(c),mx=0;
+    best=c;
+    for(j=1;j<c.length-1;j++)mx=Math.max(mx,Math.hypot(c[j][0]-A[0],c[j][1]-A[1]));
+    var loop=Math.hypot(B[0]-A[0],B[1]-A[1])<1;
+    if(r[1]>r[0]/(m+1)*0.3&&(!loop||mx>r[0]*0.14))break;
+  }
+  return best.slice(1,best.length-1);
+}
+function plan(min,n,F){
+  var L=min*SPEED/DETOUR,O=[0,0];
+  if(!F)return {pts:leg(O,O,n,L),fix:-1};
+  var d=Math.hypot(F[0],F[1]);
+  if(2*d>L*0.95)return null;
+  var u=0.4+0.2*Math.random();
+  u=Math.max(d/L*1.02,Math.min(1-d/L*1.02,u));
+  var k1=Math.round((n-1)/2),k2=n-1-k1;
+  var a=leg(O,F,k1,L*u),b=leg(F,O,k2,L*(1-u));
+  return {pts:a.concat([F],b),fix:a.length};
+}
+function toLL(o,pt){
+  return {lat:o.lat+pt[1]/111320, lng:o.lng+pt[0]/(111320*Math.cos(o.lat*Math.PI/180))};
+}
+function f(x){return x.toFixed(6)}
+
+function draw(){
+  var svg=$('map'),pts=[[0,0]].concat(wp);
+  var xs=pts.map(function(p){return p[0]}),ys=pts.map(function(p){return -p[1]});
+  var x0=Math.min.apply(0,xs),x1=Math.max.apply(0,xs),y0=Math.min.apply(0,ys),y1=Math.max.apply(0,ys);
+  var sc=240/Math.max(x1-x0,y1-y0,1),ox=150-(x0+x1)/2*sc,oy=150-(y0+y1)/2*sc;
+  var P=pts.map(function(p){return [p[0]*sc+ox,-p[1]*sc+oy]});
+  var n=P.length,mid=function(a,b){return [(a[0]+b[0])/2,(a[1]+b[1])/2]};
+  var m0=mid(P[n-1],P[0]),d='M'+m0[0]+' '+m0[1];
+  for(var i=0;i<n;i++){var c=P[i],m=mid(P[i],P[(i+1)%n]);d+=' Q'+c[0]+' '+c[1]+' '+m[0]+' '+m[1]}
+  var h='<path d="'+d+'" fill="none" stroke="var(--acc)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>';
+  for(i=1;i<n;i++)h+='<circle cx="'+P[i][0]+'" cy="'+P[i][1]+'" r="9" fill="'+(i-1===fixIdx?'var(--acc)':'var(--card)')+'" stroke="var(--acc)" stroke-width="2"/><text x="'+P[i][0]+'" y="'+(P[i][1]+4)+'" text-anchor="middle" font-size="11" font-weight="700" fill="'+(i-1===fixIdx?'var(--on)':'var(--ink)')+'">'+i+'</text>';
+  h+='<circle cx="'+P[0][0]+'" cy="'+P[0][1]+'" r="8" fill="var(--ink)"/><text x="'+P[0][0]+'" y="'+(P[0][1]-14)+'" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">出発・帰宅</text>';
+  svg.innerHTML=h;
+}
+
+function link(){
+  var o=f(origin.lat)+','+f(origin.lng);
+  var w=wp.map(function(p){var q=toLL(origin,p);return f(q.lat)+','+f(q.lng)}).join('%7C');
+  return 'https://www.google.com/maps/dir/?api=1&origin='+o+'&destination='+o+'&waypoints='+w+'&travelmode=walking';
+}
+
+function make(){
+  var o=parse($('start').value.trim());
+  if(!o){say('出発点を読み取れませんでした。「緯度,経度」か、Googleマップの長いURLを貼ってください(短縮URLは不可)。',true);return}
+  origin=o;
+  try{localStorage.setItem('himo-start',$('start').value.trim());localStorage.setItem('himo-via',$('via').value.trim())}catch(e){}
+  var vs=$('via').value.trim(),F=null;
+  if(vs){
+    var v=parse(vs);
+    if(!v){say('寄る場所を読み取れませんでした。「緯度,経度」か、Googleマップの長いURLを貼ってください。',true);return}
+    F=[(v.lng-o.lng)*111320*Math.cos(o.lat*Math.PI/180),(v.lat-o.lat)*111320];
+  }
+  var res=plan(+$('t').value,+$('n').value,F);
+  if(!res){say('その場所までの往復が散歩の長さに収まりません。時間を延ばすか、近い場所にしてください。',true);return}
+  wp=res.pts;fixIdx=res.fix;
+  genCount++;
+  draw();
+  var km=(+$('t').value*SPEED/1000).toFixed(1);
+  say('目安 約'+km+'km。気に入らなければもう一度。');
+  $('info').textContent='立ち寄り地点は'+wp.length+'つ'+(fixIdx>=0?'(塗りつぶしが指定した場所)':'')+'。番号順に回って、出発点へ戻ります。';
+  var a=$('open');a.href=link();a.removeAttribute('aria-disabled');
+  $('go').textContent='シャッフル';
+}
+
+$('go').addEventListener('click',make);
+var manualN=false;
+$('t').addEventListener('input',function(){
+  $('tv').textContent=this.value;
+  if(!manualN){var a=Math.max(3,Math.min(9,Math.round(this.value/9)));$('n').value=a;$('nv').textContent=a}
+  if(genCount)make();
+});
+$('n').addEventListener('input',function(){manualN=true;$('nv').textContent=this.value;if(genCount)make()});
+$('via').addEventListener('change',function(){if(genCount)make()});
+$('vclr').addEventListener('click',function(){$('via').value='';if(genCount)make();else{try{localStorage.setItem('himo-via','')}catch(e){}}});
+$('geo').addEventListener('click',function(){
+  if(!navigator.geolocation){say('この環境では現在地を取得できません。緯度,経度を入力してください。',true);return}
+  say('現在地を取得中…');
+  navigator.geolocation.getCurrentPosition(function(p){
+    $('start').value=p.coords.latitude.toFixed(5)+', '+p.coords.longitude.toFixed(5);say('現在地を入れました。');
+  },function(){say('現在地を取得できませんでした。緯度,経度を入力してください。',true)},{timeout:10000});
+});
+})();
+</script>
+</body>
+</html>
